@@ -1,0 +1,177 @@
+// Simulate the Ex Situ PPM population using empirical data from the founder vcf
+// In this version, the number of individuals released is maximized while still retaining enough breeding age individuals to refill vacancies
+initialize() {
+	initializeSLiMModelType("nonWF");
+	
+	// neutral mutations, which are allowed to fix
+	initializeMutationType("m1", 0.5, "f", 0.0); // Neutral mutations read in from vcf
+	m1.convertToSubstitution = F;
+	
+	initializeGenomicElementType("g1", m1, 1.0);
+	
+	if(!exists("jsonParams")) defineConstant("jsonParams","/home/erik/other_projs/lemur_simulations/inputs/SimParameters.json"); // Read parameters from a json file
+	if(!isNULL(jsonParams)){
+		catn("Reading parameters from JSON.");
+		// Read JSON file into a dictionary
+		json_path = readFile(jsonParams);
+		params = Dictionary(json_path);
+		keys = params.allKeys;
+		// Iterate and define constants
+		for (key in keys) {
+			value = params.getValue(key);
+			defineConstant(key, value);
+			catn("Defined constant: " + key + " = " + value);
+		}
+	} else {
+		// If no json is provided, define the minimum set of necessary constants
+		catn("Define parameters using a .json file.");
+		sim.simulationFinished();
+	}
+	
+	initializeGenomicElement(g1, 0, C); // Chr length, C defined in parameters json
+	initializeMutationRate(0); // Consider only standing variation
+	initializeRecombinationRate(6.8e-9); // From aye-ayes
+	initializeSex("A");
+	defineConstant("L", c( 0.65, 0.05, 0.05, 0.05, 0.05, 0.05, 0.06, 0.06, 0.075, 0.075, 0.08, 0.1, 0.1, 0.1, 0.2, 0.2, 0.25, 0.25, 0.3, 0.3, 1.0)); // age mortality
+
+}
+
+
+reproduction() {
+	// Set up potential breeders, with tagL0 as a breeding switch to only allow breeding every other year
+	maleBreeders = p1.sampleIndividuals(size=p1.individualCount, sex="M", minAge = 4, maxAge = 12, tagL0=F);
+	allFemaleBreeders = p1.sampleIndividuals(size=p1.individualCount, sex="F", minAge = 3, maxAge = 12, tagL0=F);
+	femaleBreeders = allFemaleBreeders; //sample(allFemaleBreeders,asInteger(size(allFemaleBreeders)*0.85)); // ~85% repro rate per Vasey 2007
+	maxPairs = min(size(maleBreeders),size(femaleBreeders));
+		
+	// Then reset the breeding tag and switch to true for any female that breeds 
+	p1.individuals.tagL0=F;
+
+	// down-weight young and old breeders to reflect peak fitness around age 6
+	for(i in c(maleBreeders,femaleBreeders)){
+		i.tagF = 1.0;
+		if(i.age < 6){
+			i.tagF = i.age/6;
+		}
+		if(i.age > 6){
+			i.tagF = 6/i.age;
+		}
+	}
+	offs_count = c();
+	male_count = c();
+	for (i in seq(0, maxPairs-1)) {
+		parent1 = femaleBreeders[i];
+		parent1.tagL0 = T;
+		//parent2 = maleBreeders[i];
+		// Test the effects of randomly sampling a male breeder
+		// add the male to a vector that can be used to adjust Ne for actual number of breeders
+		parent2 = sample(maleBreeders,1);
+		male_count = c(male_count,parent2);
+		//parent2.tagL0 = T;		
+		fitness_weight = mean(c(parent1.tagF,parent2.tagF));
+		do offs = asInteger(rnorm(1,3*fitness_weight,0.8));
+		while (offs > 5 | offs < 1);
+		p1.addCrossed(parent1, parent2, count=offs);
+		offs_count = c(offs_count,offs);
+		//if(offs ==5) catn(offs);
+	}
+	
+	Nm = size(unique(male_count));
+	Nf = size(femaleBreeders);
+	p1.setValue("Ne",(4*Nm*Nf)/(Nm+Nf));
+	
+	// Uncomment these cat lines to evaluate litter sizes each repro cycle
+	//catn(offs_count);
+	//catn(asInteger(offs_count*0.65));
+	self.active = 0;
+}
+
+
+1 first() {
+	sim.addSubpop("p1",K);
+	// Read in the population initialized from the "format-allele-frequencies.R" script 
+	p1.genomes.readFromVCF(genos,m1);
+	// Randomly assign ages so the simulation can start
+	age_wts = c(0.06, 0.07, 0.06, 0.07, 0.09, 0.08, 0.08, 0.06, 0.06, 0.07, 0.07, 0.05, 0.04, 0.04, 0.03, 0.02, 0.02, 0.01, 0.01, 0.02);
+	p1.individuals.age = sample(1:20,K,replace=T,weights=age_wts);
+	
+	// Set up a tagL0 that will be used to enforce breeding only every other year
+	p1.individuals.tagL0 = F;
+	previous_breeders = p1.sampleIndividuals(asInteger(p1.individualCount/2));
+	previous_breeders.tagL0 = T;
+	// Log the initial mutations and frequencies to calculate Ne over time
+	//defineGlobal("startingMuts", sim.mutationsOfType(m1));
+	//defineGlobal("startingFreqs", sim.mutationFrequencies(p1,startingMuts));
+	catn("Generation,PopSize,ExpHet,Froh,NeTemporalAF,NeBreeders");
+}
+
+early() {
+	ages = p1.individuals.age;
+	mortality = L[ages];
+	survival = 1 - mortality;
+	p1.individuals.fitnessScaling = survival;
+	p1.fitnessScaling = min(K / (p1.individualCount*mean(survival)),1.0);
+}
+
+late() {	
+	if(sim.cycle == 32){
+		defineGlobal("startingMuts", sim.mutationsOfType(m1));
+		defineGlobal("startingFreqs", sim.mutationFrequencies(p1,startingMuts));	
+	}
+	// output standard stats
+	stats = calc_stats(p1.individuals,40);
+	if(sim.cycle<=32){
+	catn(sim.cycle + "," + p1.individualCount + "," + paste(stats,sep=",") + "," + "NA" + "," + p1.getValue("Ne"));
+	} else {
+	ne = calc_ne(p1.individuals,startingFreqs,startingMuts);
+	catn(sim.cycle + "," + p1.individualCount + "," + paste(stats,sep=",") + "," + ne + "," + p1.getValue("Ne"));
+	}
+}
+
+gen late(){
+	p1.outputVCFSample(40,replace=F,outputMultiallelics=F,filePath=fout + "_gen" + gen + ".vcf");
+	sim.simulationFinished();
+}
+
+function (f) calc_stats(o subpop, i n_size){
+	if (n_size <= size(subpop)) {
+		sample_inds = sample(subpop, n_size);
+	} else {
+		sample_inds = subpop;
+	}
+	
+	//Heterozygosity
+	het = calcHeterozygosity(sample_inds.genomes);
+	
+	//Froh
+	froh=NULL;
+	for (ind in sample_inds){
+		ind_mut_pos1 = ind.genome1.mutationsOfType(m1).position;
+		ind_mut_pos2 = ind.genome2.mutationsOfType(m1).position;
+		hets = sort(c(setDifference(ind_mut_pos1,ind_mut_pos2),setDifference(ind_mut_pos2,ind_mut_pos1)));
+		starts = c(0,hets);
+		ends = c(hets,C);
+		rohs = ends - starts;
+		froh_sum = sum(rohs[rohs>ROHlen]);
+		froh = c(froh,froh_sum/C);
+	}
+	return(c(het,mean(froh)));
+}
+
+function (f) calc_ne(o subpop, f freqs, o muts){
+	pos = which(freqs > 0.3 & freqs < 0.7); // remove low and high starting frequencies
+	x0 = freqs[pos];
+	xt = sim.mutationFrequencies(p1,muts[pos]);
+	non_zeros = which(xt > 0.0 & xt < 1.0);
+	x0 = x0[non_zeros];
+	xt = xt[non_zeros];
+	st = size(subpop);
+	l = size(x0); // number of loci
+	gen_time = 8; // This is generation time - consider making it a json parameter 
+	t = (sim.cycle-32)/gen_time; // Number of generations
+	// Equations come from many, include Waples 1989 and more directly, Hui et al. 2021
+	fa = sum(((x0-xt)^2)/(x0*(1-x0)))/l; // Variance estimate averaged across all loci
+   //ne = t/(2*(fa-(0.5/K)-(0.5/st))); // Here, K is the initial size used to set up the population
+   ne = t/(2*fa); // If using the whole pop and not a sample, use this.
+   return(ne);
+} 

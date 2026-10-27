@@ -1,0 +1,10 @@
+{
+  "K": 150,
+  "C": 69866481,
+  "gen": 200,
+  "ROHlen": 1e6,
+
+  "genos": "/home/centos/USS/erik/lemurs/Vava_Ranomafana_simulations/input_files/sim-genome-setup_SUPER11_N150.vcf",
+  "fout": "/home/centos/USS/erik/lemurs/Vava_Ranomafana_simulations/super11_N150/rep1/rep1"
+}
+
